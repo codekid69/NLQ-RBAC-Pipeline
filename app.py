@@ -77,13 +77,46 @@ def parse_query_rule_based(q: str) -> Dict:
     return {"intent": intent, "date_range": rng}
 
 # Optional LLM via LangChain (only if key present)
+# Optional LLM via LangChain (only if key present)
 def parse_query_llm(q: str) -> Dict:
-    from langchain.output_parsers import StructuredOutputParser
+    """LLM → strict JSON (no zod). Falls back to rule-based on any error."""
     from langchain.prompts import ChatPromptTemplate
     from langchain_openai import ChatOpenAI
     from langchain.schema import StrOutputParser
-    from zod import z
+    import json, re
 
+    system = (
+        "You convert short admin questions into JSON.\n"
+        "Allowed intents: pending_homework, submitted_homework, performance, upcoming_quizzes.\n"
+        "If the user says last/this/next week, output explicit Monday–Sunday ISO dates.\n"
+        "Return ONLY compact JSON with keys: "
+        '{"intent": "<one-of-4>", "dateRange": null or ["YYYY-MM-DD","YYYY-MM-DD"]}'
+    )
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system),
+        ("user", "Q: {q}\nReturn only JSON. No prose.")
+    ])
+
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    chain = prompt | llm | StrOutputParser()
+    raw = chain.invoke({"q": q}).strip()
+
+    # Be defensive: extract first JSON object/array if any wrapper text sneaks in
+    m = re.search(r'(\{.*\}|\[.*\])', raw, flags=re.S)
+    txt = m.group(1) if m else raw
+
+    try:
+        data = json.loads(txt)
+        rng = tuple(data["dateRange"]) if data.get("dateRange") else None
+        return {"intent": data.get("intent"), "date_range": rng}
+    except Exception:
+        return parse_query_rule_based(q)
+
+   
+    from langchain.prompts import ChatPromptTemplate
+    from langchain_openai import ChatOpenAI
+    from langchain.schema import StrOutputParser
+    
     schema = z.object({
         "intent": z.enum(["pending_homework","submitted_homework","performance","upcoming_quizzes"]),
         "dateRange": z.union([z.tuple([z.string(), z.string()]), z.null()]),
